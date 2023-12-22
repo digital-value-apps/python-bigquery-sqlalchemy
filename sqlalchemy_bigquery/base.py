@@ -29,6 +29,7 @@ from google import auth
 import google.api_core.exceptions
 from google.cloud.bigquery import dbapi
 from google.cloud.bigquery.table import (
+    RangePartitioning,
     TableReference,
     TimePartitioning,
 )
@@ -688,6 +689,15 @@ class BigQueryDDLCompiler(DDLCompiler):
         options = {}
         clauses = []
 
+        if (
+            bq_opts.get("time_partitioning") is not None
+            and bq_opts.get("range_partitioning") is not None
+        ):
+            raise ValueError(
+                "biquery_time_partitioning and bigquery_range_partitioning"
+                "dialect options are mutually exclusive."
+            )
+
         if (time_partitioning := bq_opts.get("time_partitioning")) is not None:
             self._raise_for_type(
                 "time_partitioning",
@@ -703,6 +713,20 @@ class BigQueryDDLCompiler(DDLCompiler):
             partition_by_clause = self._process_time_partitioning(
                 table,
                 time_partitioning,
+            )
+
+            clauses.append(partition_by_clause)
+
+        if (range_partitioning := bq_opts.get("range_partitioning")) is not None:
+            self._raise_for_type(
+                "range_partitioning",
+                range_partitioning,
+                RangePartitioning,
+            )
+
+            partition_by_clause = self._process_range_partitioning(
+                table,
+                range_partitioning,
             )
 
             clauses.append(partition_by_clause)
@@ -811,6 +835,36 @@ class BigQueryDDLCompiler(DDLCompiler):
                 trunc_fn = "TIMESTAMP_TRUNC"
 
         return f"PARTITION BY {trunc_fn}({field}, {time_partitioning.type_})"
+
+    def _process_range_partitioning(
+        self, table: Table, range_partitioning: RangePartitioning
+    ):
+        if range_partitioning.field is None:
+            raise ValueError("bigquery_range_partitioning expects field to be defined")
+
+        if not isinstance(
+            table.columns[range_partitioning.field].type,
+            sqlalchemy.sql.sqltypes.INT,
+        ):
+            raise ValueError(
+                "bigquery_range_partitioning expects field data type to be INTEGER"
+            )
+
+        range_ = range_partitioning.range_
+
+        if not isinstance(range_.start, int):
+            raise ValueError(
+                "bigquery_range_partitioning expects range_.start to be defined"
+                f"provided {repr(range_.start)}"
+            )
+
+        if not isinstance(range_.end, int):
+            raise ValueError(
+                "bigquery_range_partitioning expects range_.end to be defined"
+                f"provided {repr(range_.end)}"
+            )
+
+        return f"PARTITION BY RANGE_BUCKET({range_partitioning.field}, GENERATE_ARRAY({range_.start}, {range_.end}, {range_.interval or 1}))"
 
     def _process_option_value(self, value):
         """
